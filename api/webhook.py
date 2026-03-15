@@ -13,7 +13,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write("webhook running".encode("utf-8"))
+        self.wfile.write(b"webhook running")
 
     def do_POST(self):
         content_length = int(self.headers.get("Content-Length", 0))
