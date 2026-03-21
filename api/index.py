@@ -17,6 +17,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 APP_MODE = os.environ.get("APP_MODE", "direct_gpt").strip().lower()
+
 ENABLE_INSPECT_INSERT = os.environ.get("ENABLE_INSPECT_INSERT", "false").strip().lower() in {
     "1", "true", "yes", "on"
 }
@@ -25,7 +26,8 @@ SAVE_ASSISTANT_REPLY = os.environ.get("SAVE_ASSISTANT_REPLY", "true").strip().lo
 }
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-DEFAULT_AGENT_ID = "a_main"
+DEFAULT_AGENT_ID = os.environ.get("DEFAULT_AGENT_ID", "a_main")
+ACK_REPLY_TEXT = os.environ.get("ACK_REPLY_TEXT", "收到，我正在處理。")
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
@@ -89,6 +91,7 @@ def parse_line_message(event: dict[str, Any]) -> dict[str, Any] | None:
       "message_id": "m_XXXXXXXX",
       "from": "u_XXXXXXXX",
       "to": "a_main",
+      "line_user_id": "Uxxxxxxxx",
       "content": [...],
       "created_at": "ISO8601"
     }
@@ -147,6 +150,7 @@ def parse_line_message(event: dict[str, Any]) -> dict[str, Any] | None:
         "message_id": generate_short_id("m"),
         "from": from_id,
         "to": DEFAULT_AGENT_ID,
+        "line_user_id": line_user_id,
         "content": content,
         "created_at": utc_now_iso()
     }
@@ -182,6 +186,7 @@ def build_assistant_message(user_message_obj: dict[str, Any], answer: str) -> di
         "message_id": generate_short_id("m"),
         "from": DEFAULT_AGENT_ID,
         "to": user_message_obj["from"],
+        "line_user_id": None,
         "content": [
             {
                 "type": "text",
@@ -201,6 +206,7 @@ def insert_message_to_supabase(message_obj: dict[str, Any]) -> bool:
     - message_id
     - from_id
     - to_id
+    - line_user_id
     - content
     - created_at
     """
@@ -212,6 +218,7 @@ def insert_message_to_supabase(message_obj: dict[str, Any]) -> bool:
         "message_id": message_obj["message_id"],
         "from_id": message_obj["from"],
         "to_id": message_obj["to"],
+        "line_user_id": message_obj.get("line_user_id"),
         "content": message_obj["content"],
         "created_at": message_obj["created_at"],
     }
@@ -242,7 +249,7 @@ def insert_message_to_supabase(message_obj: dict[str, Any]) -> bool:
 
 
 # -----------------------------
-# LINE reply
+# LINE reply / push
 # -----------------------------
 def reply_line(reply_token: str, text: str) -> bool:
     require_env("LINE_CHANNEL_ACCESS_TOKEN", LINE_CHANNEL_ACCESS_TOKEN)
@@ -277,6 +284,42 @@ def reply_line(reply_token: str, text: str) -> bool:
         return False
     except Exception as exc:
         debug_log("LINE reply exception", {"error": str(exc)})
+        return False
+
+
+def push_to_line(line_user_id: str, text: str) -> bool:
+    require_env("LINE_CHANNEL_ACCESS_TOKEN", LINE_CHANNEL_ACCESS_TOKEN)
+
+    payload = {
+        "to": line_user_id,
+        "messages": [
+            {
+                "type": "text",
+                "text": text[:4500],
+            }
+        ],
+    }
+
+    req = urllib_request.Request(
+        url="https://api.line.me/v2/bot/message/push",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=10) as resp:
+            debug_log("LINE push success", {"status": resp.status})
+            return True
+    except urllib_error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="ignore")
+        debug_log("LINE push failed", {"status": exc.code, "body": error_body})
+        return False
+    except Exception as exc:
+        debug_log("LINE push exception", {"error": str(exc)})
         return False
 
 
@@ -343,6 +386,12 @@ def handle_direct_gpt(reply_token: str, message_obj: dict[str, Any]) -> None:
         reply_line(reply_token, "抱歉，我剛剛處理失敗了，請稍後再試一次。")
 
 
+def handle_ack_store(reply_token: str, message_obj: dict[str, Any]) -> None:
+    # 先簡短回覆，再寫入資料庫，後續交由本機 worker 處理
+    reply_line(reply_token, ACK_REPLY_TEXT)
+    insert_message_to_supabase(message_obj)
+
+
 # -----------------------------
 # Request handler
 # -----------------------------
@@ -351,7 +400,14 @@ class handler(BaseHTTPRequestHandler):
         json_response(self, 200, {
             "ok": True,
             "message": "webhook running",
-            "mode": APP_MODE
+            "mode": APP_MODE,
+            "default_agent_id": DEFAULT_AGENT_ID,
+            "inspect_insert_enabled": ENABLE_INSPECT_INSERT,
+            "save_assistant_reply": SAVE_ASSISTANT_REPLY,
+            "ack_reply_text": ACK_REPLY_TEXT,
+            "openai_configured": bool(OPENAI_API_KEY),
+            "line_configured": bool(LINE_CHANNEL_ACCESS_TOKEN),
+            "supabase_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY),
         })
 
     def do_POST(self) -> None:
@@ -388,6 +444,8 @@ class handler(BaseHTTPRequestHandler):
                     handle_inspect(reply_token, message_obj)
                 elif APP_MODE == "direct_gpt":
                     handle_direct_gpt(reply_token, message_obj)
+                elif APP_MODE == "ack_store":
+                    handle_ack_store(reply_token, message_obj)
                 else:
                     reply_line(reply_token, f"未知模式：{APP_MODE}")
                 handled += 1
