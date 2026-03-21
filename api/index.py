@@ -29,6 +29,8 @@ OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 DEFAULT_AGENT_ID = os.environ.get("DEFAULT_AGENT_ID", "a_main")
 ACK_REPLY_TEXT = os.environ.get("ACK_REPLY_TEXT", "收到，我正在處理。")
 
+STATE_PENDING = 0
+
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 
@@ -200,7 +202,7 @@ def build_assistant_message(user_message_obj: dict[str, Any], answer: str) -> di
 # -----------------------------
 # Supabase
 # -----------------------------
-def insert_message_to_supabase(message_obj: dict[str, Any]) -> bool:
+def insert_message_to_supabase(message_obj: dict[str, Any], state_code: int = STATE_PENDING) -> bool:
     """
     Insert into public.messages:
     - message_id
@@ -208,6 +210,7 @@ def insert_message_to_supabase(message_obj: dict[str, Any]) -> bool:
     - to_id
     - line_user_id
     - content
+    - state_code
     - created_at
     """
     require_env("SUPABASE_URL", SUPABASE_URL)
@@ -220,6 +223,7 @@ def insert_message_to_supabase(message_obj: dict[str, Any]) -> bool:
         "to_id": message_obj["to"],
         "line_user_id": message_obj.get("line_user_id"),
         "content": message_obj["content"],
+        "state_code": state_code,
         "created_at": message_obj["created_at"],
     }
 
@@ -237,14 +241,14 @@ def insert_message_to_supabase(message_obj: dict[str, Any]) -> bool:
 
     try:
         with urllib_request.urlopen(req, timeout=10) as resp:
-            debug_log("Supabase insert success", {"status": resp.status})
+            debug_log("Supabase insert success", {"status": resp.status, "message_id": message_obj["message_id"]})
             return True
     except urllib_error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="ignore")
-        debug_log("Supabase insert failed", {"status": exc.code, "body": error_body})
+        debug_log("Supabase insert failed", {"status": exc.code, "body": error_body, "message_id": message_obj["message_id"]})
         return False
     except Exception as exc:
-        debug_log("Supabase insert exception", {"error": str(exc)})
+        debug_log("Supabase insert exception", {"error": str(exc), "message_id": message_obj["message_id"]})
         return False
 
 
@@ -336,13 +340,13 @@ def handle_echo(reply_token: str, message_obj: dict[str, Any]) -> None:
 
 def handle_inspect(reply_token: str, message_obj: dict[str, Any]) -> None:
     if ENABLE_INSPECT_INSERT:
-        insert_message_to_supabase(message_obj)
+        insert_message_to_supabase(message_obj, state_code=STATE_PENDING)
     reply_line(reply_token, build_inspect_reply(message_obj))
 
 
 def handle_direct_gpt(reply_token: str, message_obj: dict[str, Any]) -> None:
     # Save user message first, but do not crash if DB insert fails.
-    insert_message_to_supabase(message_obj)
+    insert_message_to_supabase(message_obj, state_code=STATE_PENDING)
 
     if not has_text(message_obj):
         reply_line(reply_token, "已收到非文字訊息，目前 direct_gpt 模式先不處理這類內容。")
@@ -379,7 +383,7 @@ def handle_direct_gpt(reply_token: str, message_obj: dict[str, Any]) -> None:
 
         if SAVE_ASSISTANT_REPLY and reply_ok:
             assistant_message = build_assistant_message(message_obj, answer)
-            insert_message_to_supabase(assistant_message)
+            insert_message_to_supabase(assistant_message, state_code=STATE_PENDING)
 
     except Exception as exc:
         debug_log("OpenAI exception", {"error": str(exc)})
@@ -389,7 +393,7 @@ def handle_direct_gpt(reply_token: str, message_obj: dict[str, Any]) -> None:
 def handle_ack_store(reply_token: str, message_obj: dict[str, Any]) -> None:
     # 先簡短回覆，再寫入資料庫，後續交由本機 worker 處理
     reply_line(reply_token, ACK_REPLY_TEXT)
-    insert_message_to_supabase(message_obj)
+    insert_message_to_supabase(message_obj, state_code=STATE_PENDING)
 
 
 # -----------------------------
@@ -405,6 +409,7 @@ class handler(BaseHTTPRequestHandler):
             "inspect_insert_enabled": ENABLE_INSPECT_INSERT,
             "save_assistant_reply": SAVE_ASSISTANT_REPLY,
             "ack_reply_text": ACK_REPLY_TEXT,
+            "state_pending_code": STATE_PENDING,
             "openai_configured": bool(OPENAI_API_KEY),
             "line_configured": bool(LINE_CHANNEL_ACCESS_TOKEN),
             "supabase_configured": bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY),
