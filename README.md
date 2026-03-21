@@ -33,12 +33,11 @@
 ## 文件索引（Documentation）
 
 ~~~text
-docs/vercel.md      # webhook 與環境設定
-docs/line.md        # LINE Bot 設定
-docs/openai.md      # AI 設定
-docs/supabase.md    # 資料儲存
-docs/modes.md       # 系統模式（APP_MODE）
-docs/flows/         # 操作流程
+- [Vercel（webhook 與環境變數）](docs/vercel.md)
+- [LINE 設定](docs/line.md)
+- [OpenAI 設定](docs/openai.md)
+- [Supabase 設定](docs/supabase.md)
+- [系統模式（APP_MODE）](docs/modes.md)
 ~~~
 
 ---
